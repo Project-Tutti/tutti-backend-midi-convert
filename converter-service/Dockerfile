@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     # xvfb — headless 디스플레이 (MuseScore 4는 offscreen 미지원)
     xvfb \
+    xauth \
     # Qt / GUI 라이브러리
     libxcb-xinerama0 \
     libxcb-cursor0 \
