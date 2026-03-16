@@ -1,0 +1,72 @@
+# ══════════════════════════════════════════════════════════════
+# Tutti — K8s Converter Service Deployment
+# ══════════════════════════════════════════════════════════════
+#
+# MuseScore 4 기반 MIDI ↔ MusicXML 변환 서비스
+# main-server에서 ClusterIP를 통해 호출
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: converter-service
+  namespace: tutti
+  labels:
+    app: converter-service
+    tier: backend
+spec:
+  replicas: 1
+  # ⚠️ 단일 레플리카에서 무중단 배포를 위한 전략
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: converter-service
+  template:
+    metadata:
+      labels:
+        app: converter-service
+        tier: backend
+    spec:
+      containers:
+        - name: converter-service
+          image: REGION-docker.pkg.dev/PROJECT_ID/tutti/converter-service:latest
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            # MuseScore headless 모드 (X11 불필요)
+            - name: QT_QPA_PLATFORM
+              value: "offscreen"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"     # MuseScore는 메모리를 많이 사용
+          # ── Probes ──
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12    # 최대 60초 대기 (5s * 12)
+      terminationGracePeriodSeconds: 30

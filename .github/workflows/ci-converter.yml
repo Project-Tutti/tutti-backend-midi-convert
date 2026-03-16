@@ -1,0 +1,132 @@
+# ══════════════════════════════════════════════════════════════
+# Tutti — CI/CD: Converter Service Build, Push & Deploy to GKE
+# ══════════════════════════════════════════════════════════════
+#
+# 💡 Main Server CI/CD 패턴을 동일하게 따름
+#   • Workload Identity Federation으로 GCP 키 없이 OIDC 인증
+#   • Kustomize로 이미지 태그 업데이트 & 배포
+#   • Docker BuildKit + GHA 캐싱으로 빌드 속도 향상
+#
+name: CI/CD - Converter Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "converter-service/**"
+      - "k8s/**"
+      - ".github/workflows/ci-converter.yml"
+
+  # 수동 배포
+  workflow_dispatch:
+
+env:
+  REGISTRY: us-central1-docker.pkg.dev
+  IMAGE_NAME: ${{ secrets.GCP_PROJECT_ID }}/tutti/converter-service
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER_NAME }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+
+jobs:
+  # ================================================================
+  # Job 1: Build & Push — Docker 이미지 빌드 후 Artifact Registry 푸시
+  # ================================================================
+  build-and-push:
+    name: 🐳 Build & Push
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write    # 💡 Workload Identity Federation에 필요
+    outputs:
+      image-tag: ${{ steps.meta.outputs.short-sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── GCP 인증 (Workload Identity Federation) ──
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      # ── 이미지 태그 생성 ──
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "📌 Image tag: ${SHORT_SHA}"
+
+      # ── Docker 빌드 & 푸시 ──
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: converter-service
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.short-sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ================================================================
+  # Job 2: Deploy — GKE에 Kustomize로 배포
+  # ================================================================
+  deploy:
+    name: 🚀 Deploy to GKE
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── GCP 인증 ──
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ── GKE Credentials ──
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      # ── 네임스페이스 확인 ──
+      - name: Ensure namespace exists
+        run: kubectl get namespace tutti 2>/dev/null || kubectl create namespace tutti
+
+      # ── Kustomize로 이미지 태그 업데이트 & 배포 ──
+      - name: Deploy with Kustomize
+        run: |
+          cd k8s/base
+
+          # 이미지 태그를 현재 커밋 SHA로 업데이트
+          kustomize edit set image \
+            REGION-docker.pkg.dev/PROJECT_ID/tutti/converter-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }}
+
+          # Kustomize build & apply
+          kubectl apply -k .
+
+      # ── 배포 상태 확인 ──
+      - name: Verify deployment
+        run: |
+          echo "⏳ Waiting for converter-service rollout..."
+          kubectl rollout status deployment/converter-service -n tutti --timeout=300s
+
+          echo ""
+          echo "✅ Deployment successful!"
+          echo "📋 Current pods:"
+          kubectl get pods -n tutti -l app=converter-service -o wide

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: converter-service    # main-server가 이 이름으로 호출
+  namespace: tutti
+  labels:
+    app: converter-service
+spec:
+  type: ClusterIP              # 클러스터 내부에서만 접근
+  selector:
+    app: converter-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
