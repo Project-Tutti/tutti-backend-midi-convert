@@ -36,10 +36,6 @@ spec:
           ports:
             - containerPort: 8000
               protocol: TCP
-          env:
-            # MuseScore headless 모드 (X11 불필요)
-            - name: QT_QPA_PLATFORM
-              value: "offscreen"
           resources:
             requests:
               cpu: "250m"

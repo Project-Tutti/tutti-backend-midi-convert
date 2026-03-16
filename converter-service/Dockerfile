@@ -3,45 +3,64 @@
 # ══════════════════════════════════════════════════════════════
 #
 # MuseScore 4 headless 모드 + FastAPI
-# QT_QPA_PLATFORM=offscreen으로 X11 없이 실행
+# AppImage를 추출하여 설치, xvfb-run으로 headless 실행
 #
 
 FROM python:3.11-slim-bookworm
 
 # ── 시스템 의존성 설치 ──
-# MuseScore 4 실행에 필요한 Qt/오디오 라이브러리 + PPA 추가 도구
+# MuseScore 4 AppImage 실행에 필요한 라이브러리
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gpg \
-    gpg-agent \
     wget \
-    && wget -qO- https://musescore.org/sites/musescore.org/files/2024-12/musescore.gpg | gpg --dearmor -o /usr/share/keyrings/musescore-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/musescore-archive-keyring.gpg] https://musescore.org/debian stable main" \
-    > /etc/apt/sources.list.d/musescore.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    musescore4 \
-    # Qt offscreen 플랫폼 플러그인
-    libqt5gui5 \
-    libqt5widgets5 \
-    libqt5network5 \
-    libqt5xml5 \
-    libqt5svg5 \
-    # 오디오 (MuseScore가 필요로 함)
-    libasound2 \
-    libpulse0 \
-    # X11 가상 프레임버퍼 (fallback)
+    # xvfb — headless 디스플레이 (MuseScore 4는 offscreen 미지원)
     xvfb \
+    # Qt / GUI 라이브러리
+    libxcb-xinerama0 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxkbcommon-x11-0 \
+    libegl1 \
+    libopengl0 \
+    libgl1 \
+    libdbus-1-3 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libxtst6 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
     # PDF 변환을 위한 폰트 패키지
     fonts-noto \
     fontconfig \
     && fc-cache -fv \
-    && apt-get purge -y software-properties-common gpg gpg-agent wget \
-    && apt-get autoremove -y \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# ── MuseScore 4 AppImage 설치 ──
+# AppImage를 다운로드 → 추출 → 심볼릭 링크 생성
+ARG MUSESCORE_VERSION=4.4.4
+ARG MUSESCORE_URL=https://github.com/musescore/MuseScore/releases/download/v${MUSESCORE_VERSION}/MuseScore-Studio-${MUSESCORE_VERSION}-x86_64.AppImage
+
+RUN wget -q "${MUSESCORE_URL}" -O /tmp/musescore.AppImage \
+    && chmod +x /tmp/musescore.AppImage \
+    && cd /opt \
+    && /tmp/musescore.AppImage --appimage-extract \
+    && rm /tmp/musescore.AppImage \
+    && ln -s /opt/squashfs-root/AppRun /usr/local/bin/musescore4
+
 # ── 환경 변수 ──
-# X11 없이 MuseScore 실행하기 위한 offscreen 플랫폼
-ENV QT_QPA_PLATFORM=offscreen
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
@@ -55,7 +74,8 @@ COPY app/ app/
 
 # ── 보안: non-root 사용자 ──
 RUN groupadd -r converter && useradd -r -g converter converter \
-    && chown -R converter:converter /app
+    && chown -R converter:converter /app \
+    && chown -R converter:converter /opt/squashfs-root
 USER converter
 
 EXPOSE 8000

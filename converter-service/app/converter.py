@@ -2,7 +2,8 @@
 # Converter Service — MuseScore CLI Wrapper
 # ══════════════════════════════════════════════════════════════
 #
-# MuseScore 4를 headless 모드로 실행하여 MIDI ↔ MusicXML 변환을 수행합니다.
+# MuseScore 4를 headless 모드로 실행하여 MIDI ↔ MusicXML ↔ PDF 변환을 수행합니다.
+# MuseScore 4는 QT_QPA_PLATFORM=offscreen이 불안정하여 xvfb-run을 사용합니다.
 # 동시 요청 처리를 위해 UUID 기반 파일명을 사용합니다.
 #
 
@@ -61,8 +62,10 @@ def convert_file(
         input_path.write_bytes(input_bytes)
         logger.info("입력 파일 저장: %s (%d bytes)", input_path, len(input_bytes))
 
-        # 2. MuseScore CLI 실행
+        # 2. MuseScore CLI 실행 (xvfb-run으로 가상 디스플레이 제공)
         cmd = [
+            "xvfb-run",
+            "-a",
             settings.musescore_path,
             "-o",
             str(output_path),
@@ -123,7 +126,7 @@ def get_musescore_version() -> str:
     """MuseScore 버전 문자열을 반환합니다."""
     try:
         result = subprocess.run(
-            [settings.musescore_path, "--version"],
+            ["xvfb-run", "-a", settings.musescore_path, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
