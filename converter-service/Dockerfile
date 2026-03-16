@@ -50,8 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── MuseScore 4 AppImage 설치 ──
 # AppImage를 다운로드 → 추출 → 심볼릭 링크 생성
-ARG MUSESCORE_VERSION=4.4.4
-ARG MUSESCORE_URL=https://github.com/musescore/MuseScore/releases/download/v${MUSESCORE_VERSION}/MuseScore-Studio-${MUSESCORE_VERSION}-x86_64.AppImage
+# 파일명에 빌드 번호가 포함됨 (GitHub Releases에서 확인)
+ARG MUSESCORE_URL=https://github.com/musescore/MuseScore/releases/download/v4.6.5/MuseScore-Studio-4.6.5.253511702-x86_64.AppImage
 
 RUN wget -q "${MUSESCORE_URL}" -O /tmp/musescore.AppImage \
     && chmod +x /tmp/musescore.AppImage \
