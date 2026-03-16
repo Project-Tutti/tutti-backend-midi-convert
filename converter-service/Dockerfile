@@ -73,10 +73,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── 애플리케이션 코드 복사 ──
 COPY app/ app/
 
-# ── 보안: non-root 사용자 ──
-RUN groupadd -r converter && useradd -r -g converter converter \
+# ── 보안: non-root 사용자 (+ MuseScore가 필요로 하는 디렉토리 생성) ──
+RUN groupadd -r converter && useradd -r -g converter -m -d /home/converter converter \
     && chown -R converter:converter /app \
-    && chown -R converter:converter /opt/squashfs-root
+    && chown -R converter:converter /opt/squashfs-root \
+    # MuseScore 데이터/로그/캐시 디렉토리
+    && mkdir -p /home/converter/.local/share/MuseScore/MuseScore4/logs/dumps \
+    && mkdir -p /home/converter/.config/MuseScore \
+    && mkdir -p /home/converter/.cache/fontconfig \
+    && chown -R converter:converter /home/converter
 USER converter
 
 EXPOSE 8000
