@@ -7,6 +7,7 @@ resources:
   - namespace.yaml
   - converter-service/deployment.yaml
   - converter-service/service.yaml
+  - converter-service/hpa.yaml
 
 labels:
 - pairs:
