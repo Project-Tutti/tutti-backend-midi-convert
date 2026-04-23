@@ -9,9 +9,11 @@
 
 import logging
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from .config import settings
 
@@ -122,6 +124,62 @@ def convert_file(
                 logger.warning("임시 파일 삭제 실패: %s (%s)", path, e)
 
 
+def inject_title_into_musicxml(xml_bytes: bytes, title: str) -> bytes:
+    """
+    변환된 MusicXML에 악보 제목을 주입합니다.
+
+    MuseScore는 MIDI 파일을 변환할 때 기본 제목을 "Untitled Score"로 설정합니다.
+    이 함수는 MusicXML의 제목 관련 태그를 실제 프로젝트 이름으로 교체합니다.
+
+    교체 대상:
+    - <movement-title>: MusicXML 표준 악보 제목
+    - <work-title>: 작품 제목
+    - <credit-words>: 악보에 시각적으로 표시되는 제목 텍스트
+
+    Args:
+        xml_bytes: MusicXML 파일 바이트
+        title: 주입할 악보 제목
+
+    Returns:
+        제목이 주입된 MusicXML 바이트
+    """
+    xml_str = xml_bytes.decode("utf-8")
+    safe_title = xml_escape(title)
+
+    # 1. 기존 movement-title 값을 추출 (credit-words 교체에 사용)
+    old_title_match = re.search(
+        r"<movement-title>(.*?)</movement-title>", xml_str
+    )
+    old_title = old_title_match.group(1).strip() if old_title_match else None
+
+    # 2. <movement-title> 교체 — MusicXML 표준 악보 제목
+    xml_str = re.sub(
+        r"(<movement-title>)(.*?)(</movement-title>)",
+        rf"\g<1>{safe_title}\g<3>",
+        xml_str,
+    )
+
+    # 3. <work-title> 교체 — 작품 제목
+    xml_str = re.sub(
+        r"(<work-title>)(.*?)(</work-title>)",
+        rf"\g<1>{safe_title}\g<3>",
+        xml_str,
+    )
+
+    # 4. <credit-words> 교체 — 악보 위에 시각적으로 표시되는 제목
+    #    기존 movement-title과 동일한 텍스트를 가진 credit-words만 교체
+    if old_title:
+        escaped_old = re.escape(old_title)
+        xml_str = re.sub(
+            rf"(<credit-words[^>]*>)\s*{escaped_old}\s*(</credit-words>)",
+            rf"\g<1>{safe_title}\g<2>",
+            xml_str,
+        )
+
+    logger.info("MusicXML 제목 주입 완료: '%s'", title)
+    return xml_str.encode("utf-8")
+
+
 def get_musescore_version() -> str:
     """MuseScore 버전 문자열을 반환합니다."""
     try:
@@ -136,3 +194,4 @@ def get_musescore_version() -> str:
     except Exception as e:
         logger.warning("MuseScore 버전 확인 실패: %s", e)
         return "unavailable"
+

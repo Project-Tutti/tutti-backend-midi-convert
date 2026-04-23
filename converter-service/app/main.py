@@ -16,6 +16,7 @@ from .converter import (
     TimeoutError,
     convert_file,
     get_musescore_version,
+    inject_title_into_musicxml,
 )
 
 logging.basicConfig(
@@ -80,6 +81,12 @@ async def midi_to_xml(request: Request):
 
     try:
         result = convert_file(body, "mid", "musicxml")
+
+        # X-Score-Title 헤더가 있으면 악보 제목을 주입
+        title = request.headers.get("X-Score-Title")
+        if title:
+            result = inject_title_into_musicxml(result, title)
+
         return Response(
             content=result,
             media_type="application/octet-stream",
