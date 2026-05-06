@@ -84,8 +84,10 @@ async def midi_to_xml(request: Request):
 
         # X-Score-Title 헤더가 있으면 악보 제목을 주입
         title = request.headers.get("X-Score-Title")
-        if title:
-            result = inject_title_into_musicxml(result, title)
+        if title and title.strip():
+            result = inject_title_into_musicxml(result, title.strip())
+        else:
+            logger.debug("X-Score-Title 헤더 없음 — 제목 주입 건너뜀")
 
         return Response(
             content=result,

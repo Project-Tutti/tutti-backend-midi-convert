@@ -144,7 +144,7 @@ def inject_title_into_musicxml(xml_bytes: bytes, title: str) -> bytes:
         제목이 주입된 MusicXML 바이트
     """
     xml_str = xml_bytes.decode("utf-8")
-    safe_title = xml_escape(title)
+    safe_title = xml_escape(title, {'"': "&quot;"})
 
     # 1. 기존 movement-title 값을 추출 (credit-words 교체에 사용)
     old_title_match = re.search(
