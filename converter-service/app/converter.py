@@ -128,13 +128,13 @@ def inject_title_into_musicxml(xml_bytes: bytes, title: str) -> bytes:
     """
     변환된 MusicXML에 악보 제목을 주입합니다.
 
-    MuseScore는 MIDI 파일을 변환할 때 기본 제목을 "Untitled Score"로 설정합니다.
-    이 함수는 MusicXML의 제목 관련 태그를 실제 프로젝트 이름으로 교체합니다.
+    MuseScore 4는 MIDI→MusicXML 변환 시 제목 관련 태그를 생성하지 않습니다.
+    이 함수는 누락된 태그를 삽입하고, 존재하는 태그는 교체합니다.
 
-    교체 대상:
-    - <movement-title>: MusicXML 표준 악보 제목
-    - <work-title>: 작품 제목
-    - <credit-words>: 악보에 시각적으로 표시되는 제목 텍스트
+    OSMD 제목 파싱 우선순위:
+    1. <work><work-title> → Title
+    2. <movement-title> → Title (work-title 없을 때) 또는 Subtitle
+    3. <credit-words> → 보충 (위 태그가 없을 때만)
 
     Args:
         xml_bytes: MusicXML 파일 바이트
@@ -146,35 +146,89 @@ def inject_title_into_musicxml(xml_bytes: bytes, title: str) -> bytes:
     xml_str = xml_bytes.decode("utf-8")
     safe_title = xml_escape(title, {'"': "&quot;"})
 
-    # 1. 기존 movement-title 값을 추출 (credit-words 교체에 사용)
-    old_title_match = re.search(
-        r"<movement-title>(.*?)</movement-title>", xml_str
-    )
-    old_title = old_title_match.group(1).strip() if old_title_match else None
+    has_work_title = bool(re.search(r"<work-title>", xml_str))
+    has_movement_title = bool(re.search(r"<movement-title>", xml_str))
+    has_credit_words = bool(re.search(r"<credit-words", xml_str))
 
-    # 2. <movement-title> 교체 — MusicXML 표준 악보 제목
-    xml_str = re.sub(
-        r"(<movement-title>)(.*?)(</movement-title>)",
-        rf"\g<1>{safe_title}\g<3>",
-        xml_str,
+    logger.info(
+        "XML 제목 태그 현황: work-title=%s, movement-title=%s, credit-words=%s",
+        has_work_title, has_movement_title, has_credit_words,
     )
 
-    # 3. <work-title> 교체 — 작품 제목
-    xml_str = re.sub(
-        r"(<work-title>)(.*?)(</work-title>)",
-        rf"\g<1>{safe_title}\g<3>",
-        xml_str,
-    )
+    # ── 1. 기존 태그가 있으면 교체 ──
 
-    # 4. <credit-words> 교체 — 악보 위에 시각적으로 표시되는 제목
-    #    기존 movement-title과 동일한 텍스트를 가진 credit-words만 교체
-    if old_title:
-        escaped_old = re.escape(old_title)
-        xml_str = re.sub(
-            rf"(<credit-words[^>]*>)\s*{escaped_old}\s*(</credit-words>)",
-            rf"\g<1>{safe_title}\g<2>",
-            xml_str,
+    if has_movement_title:
+        old_title_match = re.search(
+            r"<movement-title>(.*?)</movement-title>", xml_str, re.DOTALL
         )
+        old_title = old_title_match.group(1).strip() if old_title_match else None
+
+        xml_str = re.sub(
+            r"(<movement-title>)(.*?)(</movement-title>)",
+            rf"\g<1>{safe_title}\g<3>",
+            xml_str,
+            flags=re.DOTALL,
+        )
+
+        # credit-words 중 기존 제목과 같은 텍스트만 교체
+        if old_title and has_credit_words:
+            escaped_old = re.escape(old_title)
+            xml_str = re.sub(
+                rf"(<credit-words[^>]*>)\s*{escaped_old}\s*(</credit-words>)",
+                rf"\g<1>{safe_title}\g<2>",
+                xml_str,
+                flags=re.DOTALL,
+            )
+
+    if has_work_title:
+        xml_str = re.sub(
+            r"(<work-title>)(.*?)(</work-title>)",
+            rf"\g<1>{safe_title}\g<3>",
+            xml_str,
+            flags=re.DOTALL,
+        )
+
+    # ── 2. 태그가 없으면 삽입 ──
+    # MuseScore 4.6.5는 MIDI 변환 시 이 태그들을 생성하지 않음
+
+    if not has_work_title or not has_movement_title:
+        # <score-partwise ...> 바로 뒤에 삽입할 블록 생성
+        insert_block = ""
+
+        if not has_work_title:
+            insert_block += f"\n  <work>\n    <work-title>{safe_title}</work-title>\n  </work>"
+
+        if not has_movement_title:
+            insert_block += f"\n  <movement-title>{safe_title}</movement-title>"
+
+        if insert_block:
+            # <score-partwise ...> 태그 바로 뒤에 삽입
+            xml_str = re.sub(
+                r"(<score-partwise[^>]*>)",
+                rf"\g<1>{insert_block}",
+                xml_str,
+                count=1,
+            )
+            logger.info("누락된 제목 태그 삽입 완료: work-title=%s, movement-title=%s",
+                         not has_work_title, not has_movement_title)
+
+    # credit 태그가 없으면 삽입 (OSMD가 credit-words도 참조하므로)
+    if not has_credit_words:
+        # <part-list> 바로 앞에 credit 블록 삽입
+        credit_block = (
+            f'  <credit page="1">\n'
+            f'    <credit-type>title</credit-type>\n'
+            f'    <credit-words default-x="600" default-y="1611" '
+            f'justify="center" valign="top" font-size="24">'
+            f'{safe_title}</credit-words>\n'
+            f'  </credit>\n'
+        )
+        xml_str = xml_str.replace(
+            "<part-list>",
+            credit_block + "  <part-list>",
+            1,
+        )
+        logger.info("credit-words 태그 삽입 완료")
 
     logger.info("MusicXML 제목 주입 완료: '%s'", title)
     return xml_str.encode("utf-8")
