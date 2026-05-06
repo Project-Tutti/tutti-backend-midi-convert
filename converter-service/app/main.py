@@ -2,10 +2,11 @@
 # Converter Service — FastAPI Application
 # ══════════════════════════════════════════════════════════════
 #
-# MIDI ↔ MusicXML ↔ PDF 변환 API
+# MIDI ↔ MusicXML ↔ PDF ↔ MP3 변환 API
 # main-server에서 ClusterIP를 통해 호출됩니다.
 #
 
+import asyncio
 import logging
 
 from fastapi import FastAPI, Request, Response
@@ -27,9 +28,30 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Tutti Converter Service",
-    description="MIDI ↔ MusicXML ↔ PDF 변환 마이크로서비스",
+    description="MIDI ↔ MusicXML ↔ PDF ↔ MP3 변환 마이크로서비스",
     version="1.0.0",
 )
+
+# ── 동시성 제어 ──────────────────────────────────────────────
+# MuseScore subprocess는 CPU/메모리를 많이 사용하므로
+# 동시 실행을 1개로 제한하여 OOMKill을 방지합니다.
+# asyncio.to_thread로 실행하여 이벤트 루프 블로킹도 방지합니다.
+_conversion_semaphore = asyncio.Semaphore(1)
+
+
+async def _convert_async(
+    input_bytes: bytes, input_ext: str, output_ext: str,
+) -> bytes:
+    """convert_file을 별도 스레드에서 실행합니다.
+
+    - asyncio.to_thread: subprocess.run()이 이벤트 루프를 블로킹하지 않도록
+      하여 K8s 헬스체크 프로브가 항상 응답할 수 있게 합니다.
+    - Semaphore: MuseScore 동시 실행에 의한 OOMKill을 방지합니다.
+    """
+    async with _conversion_semaphore:
+        return await asyncio.to_thread(
+            convert_file, input_bytes, input_ext, output_ext,
+        )
 
 
 # ── Health Check ──────────────────────────────────────────────
@@ -80,7 +102,7 @@ async def midi_to_xml(request: Request):
         )
 
     try:
-        result = convert_file(body, "mid", "musicxml")
+        result = await _convert_async(body, "mid", "musicxml")
 
         # X-Score-Title 헤더가 있으면 악보 제목을 주입
         title = request.headers.get("X-Score-Title")
@@ -144,7 +166,7 @@ async def xml_to_midi(request: Request):
         )
 
     try:
-        result = convert_file(body, "musicxml", "mid")
+        result = await _convert_async(body, "musicxml", "mid")
         return Response(
             content=result,
             media_type="application/octet-stream",
@@ -199,7 +221,7 @@ async def midi_to_pdf(request: Request):
         )
 
     try:
-        result = convert_file(body, "mid", "pdf")
+        result = await _convert_async(body, "mid", "pdf")
         return Response(
             content=result,
             media_type="application/pdf",
@@ -255,7 +277,7 @@ async def xml_to_pdf(request: Request):
         )
 
     try:
-        result = convert_file(body, "musicxml", "pdf")
+        result = await _convert_async(body, "musicxml", "pdf")
         return Response(
             content=result,
             media_type="application/pdf",
@@ -269,6 +291,120 @@ async def xml_to_pdf(request: Request):
         return JSONResponse(status_code=e.status_code, content={"detail": str(e)})
     except Exception as e:
         logger.exception("XML→PDF 예기치 않은 오류: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "내부 서버 오류"},
+        )
+
+# ── MIDI → MP3 ────────────────────────────────────────────────
+
+
+@app.post(
+    "/api/v1/convert/midi-to-mp3",
+    response_class=Response,
+    responses={
+        200: {"content": {"audio/mpeg": {}}},
+        400: {"description": "잘못된 MIDI 파일"},
+        500: {"description": "변환 실패"},
+        504: {"description": "변환 타임아웃"},
+    },
+)
+async def midi_to_mp3(request: Request):
+    """
+    MIDI 파일을 MP3 오디오로 변환합니다.
+
+    MuseScore 내장 오디오 내보내기를 사용합니다.
+
+    - **Request**: `Content-Type: application/octet-stream`, Body = MIDI bytes
+    - **Response**: `Content-Type: audio/mpeg`, Body = MP3 bytes
+    """
+    body = await request.body()
+
+    if not body:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "요청 본문이 비어있습니다"},
+        )
+
+    if not body[:4] == b"MThd":
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "유효하지 않은 MIDI 파일입니다"},
+        )
+
+    try:
+        result = await _convert_async(body, "mid", "mp3")
+        return Response(
+            content=result,
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=output.mp3"},
+        )
+    except TimeoutError as e:
+        logger.error("MIDI→MP3 타임아웃: %s", e)
+        return JSONResponse(status_code=504, content={"detail": str(e)})
+    except ConversionError as e:
+        logger.error("MIDI→MP3 변환 실패: %s", e)
+        return JSONResponse(status_code=e.status_code, content={"detail": str(e)})
+    except Exception as e:
+        logger.exception("MIDI→MP3 예기치 않은 오류: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "내부 서버 오류"},
+        )
+
+
+# ── MusicXML → MP3 ────────────────────────────────────────────
+
+
+@app.post(
+    "/api/v1/convert/xml-to-mp3",
+    response_class=Response,
+    responses={
+        200: {"content": {"audio/mpeg": {}}},
+        400: {"description": "잘못된 MusicXML 파일"},
+        500: {"description": "변환 실패"},
+        504: {"description": "변환 타임아웃"},
+    },
+)
+async def xml_to_mp3(request: Request):
+    """
+    MusicXML 파일을 MP3 오디오로 변환합니다.
+
+    MuseScore 내장 오디오 내보내기를 사용합니다.
+
+    - **Request**: `Content-Type: application/xml`, Body = MusicXML bytes
+    - **Response**: `Content-Type: audio/mpeg`, Body = MP3 bytes
+    """
+    body = await request.body()
+
+    if not body:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "요청 본문이 비어있습니다"},
+        )
+
+    text_start = body[:100].decode("utf-8", errors="ignore").strip().lower()
+    if not (text_start.startswith("<?xml") or text_start.startswith("<score")):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "유효하지 않은 MusicXML 파일입니다"},
+        )
+
+    try:
+        result = await _convert_async(body, "musicxml", "mp3")
+        return Response(
+            content=result,
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=output.mp3"},
+        )
+    except TimeoutError as e:
+        logger.error("XML→MP3 타임아웃: %s", e)
+        return JSONResponse(status_code=504, content={"detail": str(e)})
+    except ConversionError as e:
+        logger.error("XML→MP3 변환 실패: %s", e)
+        return JSONResponse(status_code=e.status_code, content={"detail": str(e)})
+    except Exception as e:
+        logger.exception("XML→MP3 예기치 않은 오류: %s", e)
         return JSONResponse(
             status_code=500,
             content={"detail": "내부 서버 오류"},

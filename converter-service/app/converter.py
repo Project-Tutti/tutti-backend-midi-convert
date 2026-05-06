@@ -6,6 +6,9 @@
 # MuseScore 4는 QT_QPA_PLATFORM=offscreen이 불안정하여 xvfb-run을 사용합니다.
 # 동시 요청 처리를 위해 UUID 기반 파일명을 사용합니다.
 #
+# MP3 변환은 MuseScore 내장 오디오 내보내기를 사용하되, headless 무음 버그를
+# 우회하기 위해 Docker 컨테이너 내부에 PulseAudio Dummy Sink를 구성하여 실행합니다.
+#
 
 import logging
 import os
@@ -35,6 +38,56 @@ class TimeoutError(ConversionError):
         super().__init__(message, status_code=504)
 
 
+# ── MP3 변환을 위한 PulseAudio 상태 관리 ─────────────────────
+
+# MP3 출력의 최소 유효 크기 (바이트)
+# MP3 프레임 헤더 + 최소 오디오 데이터를 포함해야 함
+_MP3_MIN_VALID_SIZE = 1000
+
+
+def _ensure_pulseaudio():
+    """
+    PulseAudio 데몬이 실행 중인지 확인하고, 죽어있으면 재시작합니다.
+
+    MuseScore의 MP3 내보내기는 PulseAudio가 없으면 무음 파일을 생성합니다.
+    컨테이너 수명 동안 PulseAudio가 크래시할 수 있으므로 매 변환 전 확인합니다.
+    """
+    check = subprocess.run(
+        ["pulseaudio", "--check"],
+        capture_output=True,
+    )
+    if check.returncode == 0:
+        return  # 정상 실행 중
+
+    logger.warning("PulseAudio가 실행 중이 아닙니다. 재시작 시도...")
+
+    # 데몬 재시작
+    start = subprocess.run(
+        ["pulseaudio", "-D", "--exit-idle-time=-1"],
+        capture_output=True,
+        text=True,
+    )
+    if start.returncode != 0:
+        logger.error("PulseAudio 재시작 실패: %s", start.stderr.strip())
+        raise ConversionError(
+            "MP3 변환 불가: PulseAudio 오디오 서비스를 시작할 수 없습니다",
+            status_code=500,
+        )
+
+    # Null Sink 재설정
+    subprocess.run(
+        ["pacmd", "load-module", "module-null-sink",
+         "sink_name=DummySink",
+         'sink_properties=device.description="Virtual_Dummy_Sink"'],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["pacmd", "set-default-sink", "DummySink"],
+        capture_output=True,
+    )
+    logger.info("PulseAudio 재시작 및 DummySink 재설정 완료")
+
+
 def convert_file(
     input_bytes: bytes,
     input_ext: str,
@@ -55,9 +108,18 @@ def convert_file(
         ConversionError: 변환 실패 시
         TimeoutError: 타임아웃 시
     """
+    is_mp3 = output_ext == "mp3"
+
+    # MP3 변환 시 PulseAudio가 살아있는지 확인 (무음 출력 방지)
+    if is_mp3:
+        _ensure_pulseaudio()
+
     file_id = uuid.uuid4().hex
     input_path = Path(settings.temp_dir) / f"{file_id}.{input_ext}"
     output_path = Path(settings.temp_dir) / f"{file_id}.{output_ext}"
+
+    # MP3 변환은 오디오 합성이 필요하므로 더 긴 타임아웃 사용
+    timeout = settings.mp3_subprocess_timeout if is_mp3 else settings.subprocess_timeout
 
     try:
         # 1. 입력 파일 저장
@@ -79,7 +141,7 @@ def convert_file(
             cmd,
             capture_output=True,
             text=True,
-            timeout=settings.subprocess_timeout,
+            timeout=timeout,
         )
 
         # 3. 결과 확인
@@ -107,11 +169,24 @@ def convert_file(
             output_ext,
             len(output_bytes),
         )
+
+        # 5. MP3 무음/빈 파일 감지
+        if is_mp3 and len(output_bytes) < _MP3_MIN_VALID_SIZE:
+            logger.error(
+                "MP3 출력이 비정상적으로 작습니다 (%d bytes) — 무음 파일 가능성",
+                len(output_bytes),
+            )
+            raise ConversionError(
+                "MP3 변환 실패: 출력 파일이 비정상적으로 작습니다 "
+                "(PulseAudio 오디오 장치 문제일 수 있습니다)",
+                status_code=500,
+            )
+
         return output_bytes
 
     except subprocess.TimeoutExpired:
-        logger.error("MuseScore 타임아웃 (%ds 초과)", settings.subprocess_timeout)
-        raise TimeoutError(f"변환 시간 초과 ({settings.subprocess_timeout}초)")
+        logger.error("MuseScore 타임아웃 (%ds 초과)", timeout)
+        raise TimeoutError(f"변환 시간 초과 ({timeout}초)")
 
     finally:
         # 5. 임시 파일 정리

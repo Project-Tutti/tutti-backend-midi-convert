@@ -45,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # PDF 변환을 위한 폰트 패키지
     fonts-noto \
     fontconfig \
+    # 가상 오디오 환경 구성을 위한 PulseAudio (MuseScore MP3 무음 출력 방지)
+    pulseaudio \
     && fc-cache -fv \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -73,15 +75,29 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── 애플리케이션 코드 복사 ──
 COPY app/ app/
 
-# ── 보안: non-root 사용자 (+ MuseScore가 필요로 하는 디렉토리 생성) ──
-RUN groupadd -r converter && useradd -r -g converter -m -d /home/converter converter \
+# ── 보안: non-root 사용자 (+ MuseScore / PulseAudio가 필요로 하는 디렉토리 생성) ──
+RUN groupadd -r converter && useradd -r -u 999 -g converter -m -d /home/converter converter \
     && chown -R converter:converter /app \
     && chown -R converter:converter /opt/squashfs-root \
     # MuseScore 데이터/로그/캐시 디렉토리
     && mkdir -p /home/converter/.local/share/MuseScore/MuseScore4/logs/dumps \
     && mkdir -p /home/converter/.config/MuseScore \
     && mkdir -p /home/converter/.cache/fontconfig \
+    && mkdir -p /home/converter/.config/pulse \
+    # PulseAudio 런타임 디렉토리 (XDG_RUNTIME_DIR)
+    && mkdir -p /run/user/999 \
+    && chown converter:converter /run/user/999 \
+    && chmod 700 /run/user/999 \
     && chown -R converter:converter /home/converter
+
+# ── PulseAudio용 환경 변수 ──
+ENV XDG_RUNTIME_DIR=/run/user/999
+
+# ── 엔트리포인트 스크립트 복사 ──
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh \
+    && chown converter:converter /app/entrypoint.sh
+
 USER converter
 
 EXPOSE 8000
@@ -91,4 +107,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 # ── 실행 ──
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/entrypoint.sh"]
