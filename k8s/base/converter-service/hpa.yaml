@@ -9,7 +9,7 @@ spec:
     kind: Deployment
     name: converter-service
   minReplicas: 1
-  maxReplicas: 3
+  maxReplicas: 4   # 노드 4대 환경: 최대 활용
   metrics:
     - type: Resource
       resource:

@@ -38,10 +38,10 @@ spec:
               protocol: TCP
           resources:
             requests:
-              cpu: "250m"
+              cpu: "500m"       # 실사용 ~960m, 적정 requests로 스케줄러 배치 정확도 향상
               memory: "768Mi"
             limits:
-              cpu: "1000m"
+              cpu: "1500m"      # 실사용 ~960m, throttling 방지 여유 확보
               memory: "1.5Gi"   # MuseScore + PulseAudio (MP3 변환)
           # ── Probes ──
           livenessProbe:
